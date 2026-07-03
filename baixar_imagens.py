@@ -3,7 +3,7 @@ import re
 import time
 import requests
 
-from urllib.parse import urljoin
+from urllib.parse import urlparse
 from unidecode import unidecode
 from playwright.sync_api import sync_playwright
 
@@ -11,18 +11,19 @@ from playwright.sync_api import sync_playwright
 PASTA_DOWNLOAD = "downloads"
 os.makedirs(PASTA_DOWNLOAD, exist_ok=True)
 
+capturados = set()
+
 
 def limpar_nome(nome):
     nome = unidecode(nome or "item")
     nome = nome.lower()
-    nome = nome.replace("/", "-")
     nome = re.sub(r"[^a-z0-9\s-]", "", nome)
     nome = re.sub(r"\s+", "-", nome)
     nome = re.sub(r"-+", "-", nome)
     return nome.strip("-") or "item"
 
 
-def baixar_arquivo(url, nome):
+def baixar(url, nome):
 
     try:
         r = requests.get(
@@ -32,13 +33,12 @@ def baixar_arquivo(url, nome):
         )
 
         if r.status_code != 200:
-            print(f"Erro {r.status_code}: {url}")
             return
 
-        ext = os.path.splitext(url.split("?")[0])[1].lower()
+        ext = os.path.splitext(urlparse(url).path)[1].lower()
 
         if ext not in [".gif", ".png", ".jpg", ".jpeg", ".webp"]:
-            ct = r.headers.get("Content-Type", "").lower()
+            ct = r.headers.get("Content-Type", "")
 
             if "gif" in ct:
                 ext = ".gif"
@@ -46,27 +46,25 @@ def baixar_arquivo(url, nome):
                 ext = ".png"
             elif "jpeg" in ct or "jpg" in ct:
                 ext = ".jpg"
-            elif "webp" in ct:
-                ext = ".webp"
             else:
                 ext = ".gif"
 
         caminho = os.path.join(PASTA_DOWNLOAD, nome + ext)
 
         if os.path.exists(caminho):
-            print(f"Já existe -> {nome}")
             return
 
         with open(caminho, "wb") as f:
             f.write(r.content)
 
-        print(f"Baixado -> {os.path.basename(caminho)}")
+        print(f"✔ {nome}{ext}")
 
-    except Exception as e:
-        print("Erro download:", e)
+    except:
+        pass
 
 
 def scroll(page):
+
     last = 0
 
     while True:
@@ -81,116 +79,52 @@ def scroll(page):
         last = h
 
 
-def pegar_url_modal(page):
-    """
-    tenta encontrar imagem/gif dentro de qualquer modal
-    (genérico, sem depender de ID fixo)
-    """
-
-    seletores = [
-        "img[src*='gif']",
-        "img[src]",
-        "video source",
-        "video",
-        "img"
-    ]
-
-    for sel in seletores:
-        try:
-            el = page.locator(sel).first
-            src = el.get_attribute("src")
-            if src:
-                return urljoin(page.url, src)
-        except:
-            pass
-
-    return None
-
-
-def fechar_modal(page):
-    """
-    tenta múltiplas formas de fechar modal
-    """
-
-    seletores_close = [
-        "#close-modal",
-        ".close",
-        "[aria-label='close']",
-        "button:has-text('Fechar')",
-        "button:has-text('Close')"
-    ]
-
-    for sel in seletores_close:
-        try:
-            if page.locator(sel).count() > 0:
-                page.locator(sel).first.click()
-                return
-        except:
-            pass
-
-    # fallback
-    page.keyboard.press("Escape")
-
-
 with sync_playwright() as p:
 
     browser = p.chromium.launch(headless=False)
-    page = browser.new_page()
+
+    context = browser.new_context()
+
+    page = context.new_page()
 
     url = input("URL: ")
     page.goto(url, wait_until="networkidle")
 
-    time.sleep(2)
-
+    print("\nScroll inicial...\n")
     scroll(page)
 
-    # tenta pegar botões comuns de modal
-    botoes = page.locator(
-        "button:has-text('Visualizar'), button, a, div"
-    )
+    print("\nCapturando tráfego de rede...\n")
 
-    total = botoes.count()
-    print(f"\nPossíveis itens: {total}\n")
+    def interceptar(route, request):
 
-    usados = {}
+        url_req = request.url.lower()
 
-    for i in range(min(total, 200)):  # proteção
+        if any(ext in url_req for ext in [".gif", ".png", ".jpg", ".jpeg", ".webp"]):
 
-        try:
-            print(f"\nItem {i+1}")
+            if url_req not in capturados:
 
-            botoes.nth(i).click()
-            time.sleep(2)
+                capturados.add(url_req)
 
-            url_media = pegar_url_modal(page)
+                nome = limpar_nome(urlparse(request.url).path.split("/")[-1])
 
-            if url_media:
+                print("capturado:", request.url)
 
-                nome = page.locator("h1, h2, h3").first.inner_text()
-                nome = limpar_nome(nome)
+                baixar(request.url, nome)
 
-                if nome in usados:
-                    usados[nome] += 1
-                    nome_final = f"{nome}-{usados[nome]}"
-                else:
-                    usados[nome] = 1
-                    nome_final = nome
+        route.continue_()
 
-                baixar_arquivo(url_media, nome_final)
+    page.route("**/*", interceptar)
 
-            else:
-                print("Nada encontrado no modal")
+    # força interação leve pra disparar requests
+    page.mouse.wheel(0, 3000)
+    time.sleep(3)
+    page.mouse.wheel(0, 3000)
+    time.sleep(3)
 
-            fechar_modal(page)
-            time.sleep(1)
+    print("\nFinalizando captura...\n")
 
-        except Exception as e:
-            print("Erro:", e)
-            try:
-                fechar_modal(page)
-            except:
-                pass
+    time.sleep(5)
 
     browser.close()
 
-print("\nFinalizado!")
+print("\nConcluído")
